@@ -4,6 +4,7 @@ export function createScannerController(options, environment = globalThis) {
   const { video, loadLibrary, onState, onRead } = options;
   const media = environment.navigator.mediaDevices;
   let revision = 0, closed = false, stream = null, reader = null, detector = null;
+  let thoroughReader = null, scanFrame = 0;
   let timer = null, queue = Promise.resolve(), delivered = false, library = null;
   const delay = ms => new Promise(resolve => environment.setTimeout(resolve, ms));
   const current = id => !closed && revision === id && !delivered;
@@ -22,6 +23,8 @@ export function createScannerController(options, environment = globalThis) {
     }
     if (reader && typeof reader.reset === 'function') { try { reader.reset(); } catch {} }
     reader = null;
+    thoroughReader = null;
+    scanFrame = 0;
     detector = null;
   }
   function pause() {
@@ -44,14 +47,15 @@ export function createScannerController(options, environment = globalThis) {
       }
     } catch {}
   }
-  async function makeDecoders(id) {
-    try { library = await loadLibrary(); } catch {}
+  async function makeDecoders(id, loading) {
+    library = await loading;
     if (!current(id)) return;
     if (library) {
       // DecodeHintType: POSSIBLE_FORMATS=2, TRY_HARDER=3 in the bundled ZXing library.
       const formats = ['EAN_13','EAN_8','UPC_A','UPC_E','CODE_128','CODE_39','CODE_93','ITF','CODABAR']
         .map(name => library.BarcodeFormat[name]).filter(value => value !== undefined);
-      reader = new library.BrowserMultiFormatReader(new Map([[2, formats], [3, true]]));
+      reader = new library.BrowserMultiFormatReader(new Map([[2, formats]]));
+      thoroughReader = new library.BrowserMultiFormatReader(new Map([[2, formats], [3, true]]));
     }
     try {
       const Detector = environment.BarcodeDetector;
@@ -77,13 +81,14 @@ export function createScannerController(options, environment = globalThis) {
       }
       if (!current(id)) return;
       if (!code && reader) {
-        try { code = reader.decode(video).getText(); } catch {}
+        const decoder = scanFrame++ % 2 === 0 ? reader : thoroughReader;
+        try { code = decoder.decode(video).getText(); } catch {}
       }
     }
     if (!current(id)) return;
     if (code) { deliver(code, id); return; }
     // A missing barcode or a transient bad video frame never terminates scanning.
-    timer = environment.setTimeout(() => { scan(id); }, 140);
+    timer = environment.setTimeout(() => { scan(id); }, 60);
   }
   function message(error) {
     const messages = {
@@ -99,6 +104,8 @@ export function createScannerController(options, environment = globalThis) {
     const id = ++revision;
     release();
     emit({ busy: true, running: false, error: '', status: 'Preparando a camera...' });
+    // Import in parallel with camera startup, without changing lens release timing.
+    const loading = Promise.resolve().then(loadLibrary).catch(() => null);
     queue = queue.catch(() => {}).then(async () => {
       if (!current(id)) return;
       // Give mobile camera drivers time to release the previous lens.
@@ -146,7 +153,7 @@ export function createScannerController(options, environment = globalThis) {
         if (!current(id)) return;
         try { if (actual) environment.localStorage.setItem('autima.scanner.camera', actual); } catch {}
         emit({ cameras, cameraId: actual });
-        await makeDecoders(id);
+        await makeDecoders(id, loading);
         if (!current(id)) return;
         emit({ busy: false, running: true, status: 'Aponte para o codigo inteiro, com boa luz. Afaste um pouco se estiver desfocado.' });
         scan(id);
